@@ -1,7 +1,9 @@
 ## ansible-palybook install-cluster.yaml --become-user=root --become
+## ansible-playbook install-cluster.yaml --check
 ---
 - name: Checking for an odd number of nodes.
   hosts: groups['k8s_masters'][0]
+  become: true # становимся привилегированным пользователем
     
   tasks:
     - name: Abort if an even number of nodes
@@ -26,7 +28,8 @@
     - role: second_controls
 
 - name: Install worker nodes
-  hosts: groups['k8s_masters'][0],k8s_workers
+  hosts: groups['k8s_masters'][0],k8s_workers  #Установка и воркеров и управляющих нод
+  #hosts: groups['k8s_masters'][0]             #Установка только управляющих нод
 
   roles:
     - workers

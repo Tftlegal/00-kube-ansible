@@ -61,17 +61,22 @@
 - name: Test swap
   ansible.builtin.shell: "swapon --show --noheadings | wc -l"
   register: swap_ret
+ 
+- name: Debug swap_ret variable
+  debug:
+    var: swap_ret
 
 - name: If swap is enabled - disable it
   ansible.builtin.command: swapoff -a
-  when: swap_ret.stdout != "0"
+  #when: swap_ret.stdout != "0"
+  when: swap_ret.stdout | default('0') | int != 0
 
 - name: Disable SWAP in fstab
-  when: swap_ret.stdout != "0"
   ansible.builtin.replace:
     path: /etc/fstab
     regexp: '^([^#].*\s*swap\s*.*)$'
     replace: '# \1'
+  when: swap_ret.stdout | default('0') | int != 0
 
 - name: Check Disable SELinux
   when: ansible_facts['os_family'] == "RedHat"

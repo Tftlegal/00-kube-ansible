@@ -1,17 +1,26 @@
+# hosts.yaml
+all:
+  vars:
+    ansible_port: 22
+    ansible_user: root
+    ansible_pass: "b76s6hosts]Bw8jbk_udachi_hakeram!"
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_ssh_common_args: -o StrictHostKeyChecking=no
+
 k8s_masters:
   hosts:
     # Control nodes
-    control1.kryukov.local:
-      ansible_host: 192.168.218.171
+    master.sytes.ru:
+      ansible_host: 192.168.0.150
     # control2.kryukov.local:
     # control3.kryukov.local:
 k8s_workers:
   hosts:
     # Worker nodes
-    ws1.kryukov.local:
-      ansible_host: 192.168.218.174
-    ws2.kryukov.local:
-      ansible_host: 192.168.218.175
+    worker001.sytes.ru:
+      ansible_host: 192.168.0.151
+    worker002.sytes.ru:
+      ansible_host: 10.6.6.160
     # ws3.kryukov.local:
     #   ansible_host: 192.168.218.176
     # ws4.kryukov.local:

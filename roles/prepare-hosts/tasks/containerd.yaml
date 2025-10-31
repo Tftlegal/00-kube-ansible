@@ -47,14 +47,14 @@
     mode: u=rw,g=r,o=r
 
 - name: Enable dockerhub mirror on containerd [mkdir docker.io]
-  when: dockerhubMirror is true
+  when: dockerhubMirror == true
   ansible.builtin.file:
     path: /etc/containerd/certs.d/docker.io
     state: directory
     mode: u=rw,g=r,o=r
 
 - name: Enable dockerhub mirror on containerd [file hosts.toml]
-  when: dockerhubMirror is true
+  when: dockerhubMirror == true
   ansible.builtin.template:
     src: hosts.j2
     dest: /etc/containerd/certs.d/docker.io/hosts.toml
