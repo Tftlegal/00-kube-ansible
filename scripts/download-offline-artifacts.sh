@@ -8,21 +8,25 @@
 # Опции:
 #   --kube-version VERSION      Версия Kubernetes (по умолчанию: 1.36.1)
 #   --cri CRI                   CRI: containerd или crio (по умолчанию: containerd)
-#   --cni CNI                   CNI: calico или flannel (по умолчанию: calico)
+#   --cni CNI                   CNI: calico или cilium (по умолчанию: calico)
 #   --helm-version VERSION      Версия Helm (по умолчанию: v4.0.4)
 #   --output DIR                Выходной каталог (по умолчанию: tmp/offline)
 #   --package-type TYPE         Тип пакетов: deb или rpm (по умолчанию: deb)
 #   --socks5 PROXY              SOCKS5 прокси (например: 192.168.0.150:9050)
 #   --proxy-user USER:PASS      Учетные данные для прокси (например: user:password)
-#   --auto-proxy                Использовать список доступных публичных прокси (автоматическое переключение)
+#   --auto-proxy                Использовать встроенный список публичных прокси
+#   --proxyfreeonly [COUNT]     Загружать прокси из proxyfreeonly.com API (COUNT=10 по умолчанию)(GET https://proxyfreeonly.com/api/free-proxy-list?limit=500&page=1&sortBy=lastChecked&sortType=desc)
+#   --min-uptime PERCENT        Минимальный uptime для фильтрации прокси (по умолчанию: 80)
+#   --min-speed PERCENT         Минимальная скорость для фильтрации прокси (по умолчанию: 30)
 #   --help                      Показать справку
 #
 # Примеры:
 #   ./scripts/download-offline-artifacts.sh
 #   ./scripts/download-offline-artifacts.sh --kube-version 1.35.0 --cni calico
-#   ./scripts/download-offline-artifacts.sh --package-type deb --cni flannel
-#   ./scripts/download-offline-artifacts.sh --kube-version 1.36.1 --cni calico  --socks5 "192.168.0.150:9050" --proxy-user tgproxy:xVGavfDim6nxSv
 #   ./scripts/download-offline-artifacts.sh --kube-version 1.36.1 --auto-proxy
+#   ./scripts/download-offline-artifacts.sh --kube-version 1.36.1 --proxyfreeonly
+#   ./scripts/download-offline-artifacts.sh --kube-version 1.35.0 --cni calico --proxyfreeonly 20 --min-uptime 90
+#   ./scripts/download-offline-artifacts.sh --kube-version 1.36.1 --cni cilium --socks5 "192.168.0.150:9050" --proxy-user proxy:pass
 # ============================================================
 
 set -euo pipefail
@@ -44,31 +48,43 @@ PACKAGE_TYPE="deb"
 SOCKS5_PROXY=""
 PROXY_USER=""
 USE_AUTO_PROXY=0
+USE_PROXYFREEONLY=0
+PROXYFREEONLY_COUNT=10
+MIN_UPTIME=80
+MIN_SPEED=30
 CURL_PROXY_OPTS=""
 CURRENT_PROXY_INDEX=0
 
-# Список доступных публичных SOCKS5 прокси (проверены на 2024)
-# Формат: "ip:port:user:password" или "ip:port" (без авторизации)
+# Список встроенных публичных SOCKS5 прокси
 declare -a PUBLIC_PROXIES=(
-    "192.168.0.150:9050:proxy:xVGavfDim6nxSv"      # Приватный
-    "138.201.243.73:1080"                          # SOCKS5 proxy
-    "103.145.45.97:55443"                          # Public proxy
-    "45.129.201.238:7777"                          # SOCKS5
-    "185.220.101.45:9050"                          # Tor exit node (может быть медленным)
-    
+    "192.168.0.150:9050:proxy:pass"
+    "185.220.101.45:9050"
+    "138.201.243.73:1080"
+    "103.145.45.97:55443"
+    "45.129.201.238:7777"
 )
 
-# Функция логирования
+# ============================================================
+# Функции логирования
+# ============================================================
 log_info() {
-    echo "[INFO] $*"
+    echo -e "\033[0;36m[INFO]\033[0m $*"
 }
 
 log_warn() {
-    echo "[WARN] $*" >&2
+    echo -e "\033[0;33m[WARN]\033[0m $*" >&2
 }
 
 log_error() {
-    echo "[ERROR] $*" >&2
+    echo -e "\033[0;31m[ERROR]\033[0m $*" >&2
+}
+
+log_success() {
+    echo -e "\033[0;32m[✓]\033[0m $*"
+}
+
+log_fail() {
+    echo -e "\033[0;31m[✗]\033[0m $*"
 }
 
 # Парсинг аргументов
@@ -87,8 +103,20 @@ while [[ $# -gt 0 ]]; do
         --socks5)         SOCKS5_PROXY="$2"; shift 2 ;;
         --proxy-user)     PROXY_USER="$2"; shift 2 ;;
         --auto-proxy)     USE_AUTO_PROXY=1; shift ;;
+        --proxyfreeonly)
+            USE_PROXYFREEONLY=1
+            # Проверяем, есть ли параметр COUNT
+            if [[ $# -gt 1 && "$2" =~ ^[0-9]+$ ]]; then
+                PROXYFREEONLY_COUNT="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        --min-uptime)     MIN_UPTIME="$2"; shift 2 ;;
+        --min-speed)      MIN_SPEED="$2"; shift 2 ;;
         --help)
-            head -n 32 "$0" | tail -n 29 | sed 's/^# //'
+            head -n 40 "$0" | tail -n 37 | sed 's/^# //'
             exit 0
             ;;
         *) log_error "Неизвестная опция: $1"; exit 1 ;;
@@ -108,31 +136,29 @@ fi
 # Функция для проверки доступности прокси
 test_proxy() {
     local proxy_string="$1"
-    local test_url="https://example.com"
-    
+    local test_url="https://z404.ru"
+
     local socks5_addr=""
     local proxy_user_creds=""
-    
-    # Парсим строку прокси
+
+    # Парсим строку прокси (формат: host:port или host:port:user:pass)
     IFS=':' read -r host port user pass <<< "$proxy_string"
-    
+
     if [[ -z "$user" ]] || [[ "$user" == "$pass" ]]; then
-        # Без авторизации
         socks5_addr="$host:$port"
     else
-        # С авторизацией
         socks5_addr="$host:$port"
         proxy_user_creds="$user:$pass"
     fi
-    
+
     local curl_cmd="curl -s --connect-timeout 5 --max-time 10 --socks5 $socks5_addr"
     if [[ -n "$proxy_user_creds" ]]; then
         curl_cmd="$curl_cmd --proxy-user $proxy_user_creds"
     fi
     curl_cmd="$curl_cmd -o /dev/null -w '%{http_code}' $test_url"
-    
+
     local http_code=$(eval "$curl_cmd" 2>/dev/null || echo "000")
-    
+
     if [[ "$http_code" == "200" ]]; then
         return 0
     else
@@ -144,17 +170,17 @@ test_proxy() {
 set_proxy() {
     local proxy_string="$1"
     local host port user pass
-    
+
     IFS=':' read -r host port user pass <<< "$proxy_string"
-    
+
     SOCKS5_PROXY="$host:$port"
-    
+
     if [[ -z "$user" ]] || [[ "$user" == "$pass" ]]; then
         PROXY_USER=""
     else
         PROXY_USER="$user:$pass"
     fi
-    
+
     update_curl_proxy_opts
 }
 
@@ -169,24 +195,98 @@ update_curl_proxy_opts() {
     fi
 }
 
+# Функция загрузки прокси из proxyfreeonly.com API
+load_proxies_from_api() {
+    log_info "Загрузка прокси из proxyfreeonly.com API..."
+    log_info "Параметры фильтрации: min-uptime=$MIN_UPTIME%, min-speed=$MIN_SPEED%"
+
+    local api_url="https://proxyfreeonly.com/api/free-proxy-list?limit=500&page=1&sortBy=lastChecked&sortType=desc"
+    local temp_file="/tmp/proxies_api_$$.json"
+
+    # Скачиваем список прокси
+    #if ! curl -s --socks5 "192.168.0.150:9050" --proxy-user proxy:pass  --max-time 30 "$api_url" -o "$temp_file" 2>/dev/null; then
+    if ! curl -s --max-time 30 "$api_url" -o "$temp_file" 2>/dev/null; then
+    
+        log_error "Не удалось загрузить список прокси из API"
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    # Проверяем, что файл не пустой
+    if [[ ! -s "$temp_file" ]]; then
+        log_error "Полученный файл прокси пустой"
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    # Парсим JSON и фильтруем прокси
+    # Используем jq если доступно, иначе grep + awk
+    if command -v jq &>/dev/null; then
+        local filtered_proxies=$(jq -r ".[] | select(.protocols[]? == \"socks5\" and .upTime >= $MIN_UPTIME and .speed >= $MIN_SPEED) | \"\(.ip):\(.port)\"" "$temp_file" 2>/dev/null)
+    else
+        log_warn "jq не установлен, используется базовый парсинг JSON"
+        # Базовый парсинг без jq (менее надежный)
+        local filtered_proxies=$(grep -oP '"ip":"[^"]*"|"port":"[^"]*"|"upTime":\d+|"speed":\d+' "$temp_file" | \
+            sed 's/"//g' | paste -d: - - - - | \
+            awk -F: '$4 >= '$MIN_UPTIME' && $8 >= '$MIN_SPEED' {print $2":"$6}' | head -n 100)
+    fi
+
+    # Преобразуем в массив и выбираем рандомные прокси
+    local proxy_array=($filtered_proxies)
+    local total_proxies=${#proxy_array[@]}
+
+    if [[ $total_proxies -eq 0 ]]; then
+        log_warn "Не найдено прокси, соответствующих критериям фильтрации"
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    log_info "Найдено прокси: $total_proxies (запрошено: $PROXYFREEONLY_COUNT)"
+
+    # Выбираем рандомные прокси
+    local selected_count=$((PROXYFREEONLY_COUNT < total_proxies ? PROXYFREEONLY_COUNT : total_proxies))
+    local selected_proxies=()
+
+    # Генерируем рандомные индексы
+    for ((i = 0; i < selected_count; i++)); do
+        local random_index=$((RANDOM % total_proxies))
+        selected_proxies+=("${proxy_array[$random_index]}")
+    done
+
+    # Очищаем встроенный список и заполняем выбранными прокси
+    PUBLIC_PROXIES=()
+    for proxy in "${selected_proxies[@]}"; do
+        PUBLIC_PROXIES+=("$proxy")
+    done
+
+    rm -f "$temp_file"
+
+    log_info "Выбрано рандомных прокси: ${#PUBLIC_PROXIES[@]}"
+    for i in "${!PUBLIC_PROXIES[@]}"; do
+        log_info "  [$((i+1))] ${PUBLIC_PROXIES[$i]}"
+    done
+
+    return 0
+}
+
 # Функция для поиска работающего прокси
 find_working_proxy() {
     log_info "Поиск доступного прокси..."
-    
+
     for i in "${!PUBLIC_PROXIES[@]}"; do
         local proxy="${PUBLIC_PROXIES[$i]}"
         log_info "Проверка прокси [$((i+1))/${#PUBLIC_PROXIES[@]}]: $proxy"
-        
+
         if test_proxy "$proxy"; then
-            log_info "✓ Прокси доступен: $proxy"
+            log_success "Прокси доступен: $proxy"
             set_proxy "$proxy"
             CURRENT_PROXY_INDEX=$i
             return 0
         else
-            log_warn "✗ Прокси недоступен: $proxy"
+            log_fail "Прокси недоступен: $proxy"
         fi
     done
-    
+
     log_error "Не найдено ни одного доступного прокси"
     return 1
 }
@@ -194,15 +294,15 @@ find_working_proxy() {
 # Функция для переключения на следующий прокси
 switch_to_next_proxy() {
     local next_index=$(( (CURRENT_PROXY_INDEX + 1) % ${#PUBLIC_PROXIES[@]} ))
-    
+
     if [[ $next_index -eq $CURRENT_PROXY_INDEX ]]; then
         log_error "Все прокси исчерпаны"
         return 1
     fi
-    
+
     local next_proxy="${PUBLIC_PROXIES[$next_index]}"
     log_warn "Переключение на следующий прокси: $next_proxy"
-    
+
     if test_proxy "$next_proxy"; then
         set_proxy "$next_proxy"
         CURRENT_PROXY_INDEX=$next_index
@@ -213,7 +313,21 @@ switch_to_next_proxy() {
 }
 
 # Инициализация прокси
-if [[ $USE_AUTO_PROXY -eq 1 ]]; then
+if [[ $USE_PROXYFREEONLY -eq 1 ]]; then
+    log_info "Инициализация прокси из proxyfreeonly.com..."
+    if load_proxies_from_api; then
+        find_working_proxy || {
+            log_error "Не удалось найти работающий прокси из API"
+            SOCKS5_PROXY=""
+            PROXY_USER=""
+        }
+    else
+        log_error "Не удалось загрузить прокси из API"
+        SOCKS5_PROXY=""
+        PROXY_USER=""
+    fi
+elif [[ $USE_AUTO_PROXY -eq 1 ]]; then
+    log_info "Инициализация прокси из встроенного списка..."
     find_working_proxy || {
         log_error "Не удалось найти работающий прокси. Продолжу без прокси."
         SOCKS5_PROXY=""
@@ -245,7 +359,8 @@ if [[ -n "$SOCKS5_PROXY" ]]; then
         echo " Прокси-юзер: ${PROXY_USER%:*}"
     fi
 fi
-echo " Авто-прокси: $([[ $USE_AUTO_PROXY -eq 1 ]] && echo 'ДА' || echo 'НЕТ')"
+echo " Авто-прокси: $([[ $USE_AUTO_PROXY -eq 1 ]] && echo 'ДА (встроенные)' || echo 'НЕТ')"
+echo " ProxyFreeOnly: $([[ $USE_PROXYFREEONLY -eq 1 ]] && echo "ДА (API, count=$PROXYFREEONLY_COUNT)" || echo 'НЕТ')"
 echo " Выходной каталог: $OUTPUT_DIR"
 echo "============================================================"
 
@@ -269,7 +384,7 @@ download() {
 
     echo "  [GET]  $desc"
     echo "        URL: $url"
-    
+
     while [[ $retry_count -lt $max_retries ]]; do
         # Формирование команды curl с опциями прокси
         local curl_cmd="curl -fSL --connect-timeout 30 --max-time 600"
@@ -277,21 +392,21 @@ download() {
             curl_cmd="$curl_cmd $CURL_PROXY_OPTS"
         fi
         curl_cmd="$curl_cmd -o \"$dest\" \"$url\""
-        
+
         if eval "$curl_cmd"; then
             echo "        OK: $(du -h "$dest" | cut -f1)"
             return 0
         else
             local curl_exit_code=$?
             retry_count=$((retry_count + 1))
-            
+
             # Проверяем код ошибки
             if [[ $curl_exit_code -eq 22 ]]; then
                 # HTTP ошибка (403, 404 и т.д.)
                 echo "        HTTP ошибка. Попытка переключения прокси... ($retry_count/$max_retries)"
                 rm -f "$dest"
-                
-                if [[ $USE_AUTO_PROXY -eq 1 ]]; then
+
+                if [[ $USE_AUTO_PROXY -eq 1 ]] || [[ $USE_PROXYFREEONLY -eq 1 ]]; then
                     if ! switch_to_next_proxy; then
                         break
                     fi
@@ -311,7 +426,7 @@ download() {
             fi
         fi
     done
-    
+
     echo "        ОШИБКА: не удалось скачать $url"
     rm -f "$dest"
     return 1
@@ -335,7 +450,7 @@ download_helm_chart() {
     fi
 
     echo "  [HELM] $desc"
-    
+
     while [[ $retry_count -lt $max_retries ]]; do
         # Конфигурация прокси для helm если необходимо
         if [[ -n "$CURL_PROXY_OPTS" ]]; then
@@ -345,14 +460,14 @@ download_helm_chart() {
             fi
             export HTTPS_PROXY="$HTTP_PROXY"
         fi
-        
+
         helm repo add _tmp "$repo_url" 2>/dev/null || true
         helm repo update _tmp 2>/dev/null || true
-        
+
         if helm pull _tmp/"$chart_name" --version "$chart_version" --destination "$(dirname "$dest")" 2>/dev/null; then
             mv "$(dirname "$dest")"/"${chart_name}-${chart_version}.tgz" "$dest" 2>/dev/null || \
             mv "$(dirname "$dest")"/"${chart_name#*/}-${chart_version}.tgz" "$dest" 2>/dev/null || true
-            
+
             if [[ -f "$dest" ]]; then
                 echo "        OK: $(du -h "$dest" | cut -f1)"
                 helm repo remove _tmp 2>/dev/null || true
@@ -360,12 +475,12 @@ download_helm_chart() {
                 return 0
             fi
         fi
-        
+
         retry_count=$((retry_count + 1))
         if [[ $retry_count -lt $max_retries ]]; then
             echo "        Ошибка при скачивании чарта. Повтор... ($retry_count/$max_retries)"
-            
-            if [[ $USE_AUTO_PROXY -eq 1 ]]; then
+
+            if [[ $USE_AUTO_PROXY -eq 1 ]] || [[ $USE_PROXYFREEONLY -eq 1 ]]; then
                 if switch_to_next_proxy; then
                     update_curl_proxy_opts
                 fi
@@ -373,7 +488,7 @@ download_helm_chart() {
             sleep 2
         fi
     done
-    
+
     echo "        ОШИБКА: не удалось скачать чарт $chart_name"
     helm repo remove _tmp 2>/dev/null || true
     unset HTTP_PROXY HTTPS_PROXY
@@ -473,7 +588,7 @@ echo ""
 echo ">>> cert-manager (OCI chart)"
 if [[ ! -f "$OUTPUT_DIR/utils/cert-manager-${CERT_MANAGER_VERSION}.tgz" ]]; then
     echo "  [HELM] cert-manager $CERT_MANAGER_VERSION (OCI)"
-    
+
     # Конфигурация прокси для helm
     if [[ -n "$CURL_PROXY_OPTS" ]]; then
         export HTTP_PROXY="socks5://${SOCKS5_PROXY}"
@@ -482,12 +597,12 @@ if [[ ! -f "$OUTPUT_DIR/utils/cert-manager-${CERT_MANAGER_VERSION}.tgz" ]]; then
         fi
         export HTTPS_PROXY="$HTTP_PROXY"
     fi
-    
+
     helm pull "oci://quay.io/jetstack/charts/cert-manager" \
         --version "$CERT_MANAGER_VERSION" \
         --destination "$OUTPUT_DIR/utils/" 2>/dev/null || \
     echo "  [WARN] Не удалось скачать cert-manager OCI chart — требуется helm v3.8+"
-    
+
     unset HTTP_PROXY HTTPS_PROXY
 else
     echo "  [SKIP] cert-manager (уже существует)"
@@ -544,7 +659,7 @@ echo ""
 echo ">>> Envoy Gateway (OCI chart)"
 if [[ ! -f "$OUTPUT_DIR/utils/helm-charts/envoy-gateway-${ENVOY_GATEWAY_VERSION}.tgz" ]]; then
     echo "  [HELM] Envoy Gateway $ENVOY_GATEWAY_VERSION (OCI)"
-    
+
     # Конфигурация прокси для helm
     if [[ -n "$CURL_PROXY_OPTS" ]]; then
         export HTTP_PROXY="socks5://${SOCKS5_PROXY}"
@@ -553,12 +668,12 @@ if [[ ! -f "$OUTPUT_DIR/utils/helm-charts/envoy-gateway-${ENVOY_GATEWAY_VERSION}
         fi
         export HTTPS_PROXY="$HTTP_PROXY"
     fi
-    
+
     helm pull "oci://docker.io/envoyproxy/gateway-helm" \
         --version "$ENVOY_GATEWAY_VERSION" \
         --destination "$OUTPUT_DIR/utils/helm-charts/" 2>/dev/null || \
     echo "  [WARN] Не удалось скачать Envoy Gateway OCI chart — требуется helm v3.8+"
-    
+
     unset HTTP_PROXY HTTPS_PROXY
 else
     echo "  [SKIP] Envoy Gateway (уже существует)"
@@ -573,7 +688,7 @@ echo ">>> Helm-плагины"
 HELM_DIFF_DIR="$OUTPUT_DIR/utils/helm-plugins/helm-diff"
 if [[ ! -d "$HELM_DIFF_DIR/.git" ]]; then
     echo "  [GET]  helm-diff plugin"
-    
+
     # Конфигурация прокси для git если необходимо
     if [[ -n "$CURL_PROXY_OPTS" ]]; then
         export HTTP_PROXY="socks5://${SOCKS5_PROXY}"
@@ -582,10 +697,10 @@ if [[ ! -d "$HELM_DIFF_DIR/.git" ]]; then
         fi
         export HTTPS_PROXY="$HTTP_PROXY"
     fi
-    
+
     rm -rf "$HELM_DIFF_DIR"
     git clone --depth 1 https://github.com/databus23/helm-diff.git "$HELM_DIFF_DIR" || true
-    
+
     unset HTTP_PROXY HTTPS_PROXY
 else
     echo "  [SKIP] helm-diff plugin (уже существует)"
@@ -606,6 +721,7 @@ else
     find "$OUTPUT_DIR" -type f | sort
 fi
 echo ""
+echo "Kubernetes : $KUBE_VERSION"
 echo "Следующие шаги:"
 echo "  1. Перенесите каталог $OUTPUT_DIR/ на все ноды кластера"
 echo "  2. Запустите установку с флагом:"
@@ -614,22 +730,74 @@ echo ""
 echo "ПРИМЕЧАНИЕ: Образы Kubernetes (k8s-images.tar) нужно создать"
 echo "отдельно на машине с доступом в интернет:"
 echo ""
-echo "  kubeadm config images pull --kubernetes-version=$KUBE_VERSION"
+echo "  kubeadm config images pull --kubernetes-version=$KUBE_VERSION --cri-socket unix:///var/run/containerd/containerd.sock"
+echo "  kubeadm config images pull --kubernetes-version=$KUBE_VERSION --cri-socket unix:///var/run/cri-dockerd.sock"
 echo "  ctr -n k8s.io images export $OUTPUT_DIR/images/k8s-images.tar \\"
 echo "    \$(ctr -n k8s.io images list -q | grep -v sha256)"
+#echo '  mkdir -p tmp/offline/images && for i in $(ctr -n k8s.io images list -q | grep -v sha256); do ctr -n k8s.io images export tmp/offline/images/$(echo "$i" | tr '/:' '__').tar "$i" || echo "skip $i"; done'
+#echo '  mkdir -p tmp/offline/images && for i in $(ctr -n k8s.io images list -q | grep -v sha256); do ctr -n k8s.io images export tmp/offline/images/$(echo "$i" | tr '/:' '__').tar "$i" >/dev/null 2>&1 || true; done'
+echo "  # делаем export всех образов хоста в k8s-images.tar:"
+cat <<EOF
+mkdir -p "$OUTPUT_DIR/images" && ctr -n k8s.io images export "$OUTPUT_DIR/images/k8s-images.tar" \$(
+  ctr -n k8s.io images list -q | grep -Ev '(^sha256:|@sha256:)' | while read -r i; do
+    ctr -n k8s.io images export /tmp/.test.tar "\$i" >/dev/null 2>&1 && printf '%s\n' "\$i"
+  done
+)
+EOF
+echo "  # импорт образов из архива k8s-images.tar:"
+echo "  ctr -n k8s.io images import $OUTPUT_DIR/images/k8s-images.tar"
+echo "  ctr -n k8s.io images list -q | grep -Ev '(^sha256:|@sha256:)'"
 echo ""
+echo " Kubernetes : $KUBE_VERSION"
+echo " CNI        : $CNI"
 if [[ "$CNI" == "calico" ]]; then
     echo "Для Calico-образов:"
-    echo "  ctr -n k8s.io images pull quay.io/tigera/operator:\${CALICO_VERSION}"
+    echo "  ctr -n k8s.io images pull quay.io/tigera/operator:${CALICO_VERSION}"
+    echo "  ctr -n k8s.io images pull docker.io/calico/cni:${CALICO_VERSION}"
+    echo "  ctr -n k8s.io images pull docker.io/calico/kube-controllers:${CALICO_VERSION}"
+    echo "  ctr -n k8s.io images pull docker.io/calico/node:${CALICO_VERSION}"
+    echo "  # затем pull каждого образа и export в calico-images.tar:"
     echo "  ctr -n k8s.io images export $OUTPUT_DIR/images/calico-images.tar \\"
     echo "    \$(ctr -n k8s.io images list -q | grep -E 'calico|tigera')"
+cat <<EOF
+mkdir -p "$OUTPUT_DIR/images" && ctr -n k8s.io images export "$OUTPUT_DIR/images/calico-images.tar" \$(
+  ctr -n k8s.io images list -q | grep -E 'calico|tigera'| grep -Ev '(^sha256:|@sha256:)' | while read -r i; do
+    ctr -n k8s.io images export /tmp/.test.tar "\$i" >/dev/null 2>&1 && printf '%s\n' "\$i"
+  done
+)
+EOF
+    echo "  # импорт образов из архива calico-images.tar:"
+    echo " ctr -n k8s.io images import $OUTPUT_DIR/images/calico-images.tar"
+    echo " ctr -n k8s.io images list -q | grep -E 'calico|tigera'"
     echo ""
 elif [[ "$CNI" == "cilium" ]]; then
     echo "Для Cilium-образов:"
-    echo "  helm template cilium cilium/cilium --version \${CILIUM_VERSION} |"
+    echo "  helm repo add cilium https://helm.cilium.io/ && helm repo update"
+    echo "  # получить список image refs из chart:"
+    echo "  helm template cilium cilium/cilium --version ${CILIUM_VERSION} |"
     echo "    grep 'image:' | awk '{print \$2}' | sed 's/\"//g' | sort -u"
-    echo "  # затем pull каждого образа и export в cilium-images.tar:"
+    echo "  # затем pull каждого образа и export в cilium-images.tar"
     echo "  ctr -n k8s.io images export $OUTPUT_DIR/images/cilium-images.tar \\"
     echo "    \$(ctr -n k8s.io images list -q | grep -E 'cilium')"
+    #echo "  ctr -n k8s.io images pull \$(helm template cilium cilium/cilium --version ${CILIUM_VERSION} |grep 'image:' | awk '{print \$2}' | sed 's/\"//g' | sort -u)"
+    #echo "  ctr -n k8s.io images export $OUTPUT_DIR/images/cilium-images.tar \$(helm template cilium cilium/cilium --version ${CILIUM_VERSION} |grep 'image:' | awk '{print \$2}' | sed 's/\"//g' | sort -u)"
+    echo "  # получить список image refs из chart:"
+    echo "  helm template cilium cilium/cilium --version ${CILIUM_VERSION} |"
+    echo "    grep 'image:' | awk '{print \$2}' | sed 's/\"//g' | sort -u"
+    echo "  # pull только тех образов, которые реально доступны:"
+    echo "  while read -r i; do"
+    echo "    ctr -n k8s.io images pull \"\$i\""
+    echo "  done < <(helm template cilium cilium/cilium --version ${CILIUM_VERSION} | grep 'image:' | awk '{print \$2}' | sed 's/\"//g' | sort -u)"
+    echo "  # export только уже pulled образов:"
+    echo "  ctr -n k8s.io images export \"$OUTPUT_DIR/images/cilium-images.tar\" \$("
+    echo "    helm template cilium cilium/cilium --version ${CILIUM_VERSION} |"
+    echo "      grep 'image:' | awk '{print \$2}' | sed 's/\"//g' | sort -u |"
+    echo "      while read -r i; do"
+    echo "        ctr -n k8s.io images export /tmp/.test.tar \"\$i\" >/dev/null 2>&1 && printf '%s\n' \"\$i\""
+    echo "      done"
+    echo "  )"
+    echo "  # импорт образов из архива cilium-images.tar:"
+    echo "  ctr -n k8s.io images import $OUTPUT_DIR/images/cilium-images.tar"
+    echo "  ctr -n k8s.io images list -q | grep  -E 'cilium'"
     echo ""
 fi
