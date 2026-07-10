@@ -1,30 +1,40 @@
+# hosts.yaml
+all:
+  vars:
+    ansible_port: 22
+    ansible_user: root
+    ansible_pass: "b76s6hosts]Bw8jbk_udachi_hakeram!"
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_ssh_common_args: -o StrictHostKeyChecking=no
+
 k8s_masters:
   hosts:
     # Control nodes
-    pr1.kryukov.local:
-      ansible_host: 192.168.218.136
+    master.sytes.ru:
+      ansible_host: 192.168.0.150
+    # control2.kryukov.local:
+    # control3.kryukov.local:
 k8s_workers:
   hosts:
     # Worker nodes
-    pr2.kryukov.local:
-      ansible_host: 192.168.218.137
-    pr3.kryukov.local:
-      ansible_host: 192.168.218.138
-    pr4.kryukov.local:
-      ansible_host: 192.168.218.139
+    worker001.sytes.ru:
+      ansible_host: 192.168.0.151
+    worker002.sytes.ru:
+      ansible_host: 10.6.6.160
+    # ws3.kryukov.local:
+    #   ansible_host: 192.168.218.176
+    # ws4.kryukov.local:
+    #   ansible_host: 192.168.218.177
+
 k8s_cluster:
   children:
     k8s_masters:
     k8s_workers:
+
 # External etcd nodes (раскомментировать при etcd_mode: "external")
 # etcd_nodes:
 #   hosts:
-#     e1.kryukov.lan:
-#       ansible_host: 192.168.218.141
+#     e1.sytes.ru:
+#       ansible_host: 192.168.0.150
 #       etcd_short_name: e1
-#     e2.kryukov.lan:
-#       ansible_host: 192.168.218.142
-#       etcd_short_name: e2
-#     e3.kryukov.lan:
-#       ansible_host: 192.168.218.143
-#       etcd_short_name: e3
+

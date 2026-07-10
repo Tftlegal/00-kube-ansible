@@ -22,7 +22,7 @@
     src: keepalived.j2
     dest: /etc/keepalived/keepalived.conf
     mode: '0600'
-  notify: restart keepalived
+  notify: Restart keepalived
 
 - name: Скопировать haproxy.cfg
   ansible.builtin.template:
@@ -30,13 +30,14 @@
     dest: /etc/haproxy/haproxy.cfg
     mode: '0600'
   register: haproxy_conf
-  notify: restart haproxy
+  notify: Restart haproxy
 
-- name: Включить keepalived и haproxy
-  ansible.builtin.service:
+- name: Enable and start keepalived and haproxy
+  ansible.builtin.systemd:
     name: "{{ item }}"
     state: started
-    enabled: true
+    enabled: yes
+    daemon_reload: yes
   loop:
     - keepalived
     - haproxy

@@ -68,10 +68,14 @@
 - name: Проверить swap
   ansible.builtin.command: swapon --show --noheadings
   register: swap_ret
-  changed_when: false
+ 
+- name: Debug swap_ret variable
+  debug:
+    var: swap_ret
 
 - name: Отключить swap
   ansible.builtin.command: swapoff -a
+<<<<<<< HEAD
   when: swap_ret.stdout != ""
 
 - name: Закомментировать swap в fstab
@@ -84,6 +88,17 @@
 # ============================================================
 # SELinux (только RedHat)
 # ============================================================
+=======
+  #when: swap_ret.stdout != "0"
+  when: swap_ret.stdout | default('0') | int != 0
+
+- name: Disable SWAP in fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\s*swap\s*.*)$'
+    replace: '# \1'
+  when: swap_ret.stdout | default('0') | int != 0
+>>>>>>> 91a030b (Fix role BigKAA 00-kube-ansible for  ansible v2.9)
 
 - name: Отключить SELinux
   when: ansible_facts['os_family'] == "RedHat"

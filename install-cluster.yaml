@@ -233,6 +233,15 @@
 - name: Pre-flight connectivity
   hosts: k8s_cluster
   gather_facts: false
+=======
+## ansible-palybook install-cluster.yaml --become-user=root --become
+## ansible-playbook install-cluster.yaml --check
+---
+- name: Checking for an odd number of nodes.
+  hosts: groups['k8s_masters'][0]
+  become: true # становимся привилегированным пользователем
+    
+>>>>>>> 91a030b (Fix role BigKAA 00-kube-ansible for  ansible v2.9)
   tasks:
     - name: Проверка — доступность хоста
       ansible.builtin.ping:
@@ -500,7 +509,8 @@
     - role: second_controls
 
 - name: Install worker nodes
-  hosts: groups['k8s_masters'][0],k8s_workers
+  hosts: groups['k8s_masters'][0],k8s_workers  #Установка и воркеров и управляющих нод
+  #hosts: groups['k8s_masters'][0]             #Установка только управляющих нод
 
   roles:
     - workers
